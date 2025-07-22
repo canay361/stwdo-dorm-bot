@@ -1,5 +1,3 @@
-# GÜNCELLENMİŞ main.py
-
 from flask import Flask
 from threading import Thread
 import os
@@ -12,6 +10,8 @@ import re
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -38,24 +38,22 @@ class STWDOTelegramBot:
         self.check_interval = 60  # 1 dakika
         self.last_hash = None
         self.last_rooms_status = None
-        
+
         if not self.bot_token or not self.chat_id:
             raise ValueError("TELEGRAM_BOT_TOKEN ve TELEGRAM_CHAT_ID ortam değişkenleri eksik")
 
     def init_webdriver(self):
         try:
-            selenium_url = "http://demo.zalenium.com/wd/hub"
             options = Options()
             options.add_argument("--headless")
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--window-size=1920,1080")
             options.add_argument("user-agent=Mozilla/5.0")
-
-            driver = webdriver.Remote(command_executor=selenium_url, options=options)
+            driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
             return driver
         except Exception as e:
-            logging.error(f"Selenium başlatılamadı: {e}")
+            logging.error(f"Yerel WebDriver başlatılamadı: {e}")
             raise
 
     def fetch_page_content(self):
@@ -65,24 +63,19 @@ class STWDOTelegramBot:
             driver.get(self.website_url)
 
             WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, ".housing-offer-item, .offer-item, .no-results")
-                )
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".housing-offer-item, .offer-item"))
             )
             content = driver.page_source
 
             if "no results found" in content.lower():
                 driver.get(self.german_url)
                 WebDriverWait(driver, 30).until(
-                    EC.presence_of_element_located(
-                        (By.CSS_SELECTOR, ".housing-offer-item, .offer-item, .keine-ergebnisse")
-                    )
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".housing-offer-item, .offer-item"))
                 )
                 content = driver.page_source
 
             logging.info(f"Sayfa içerik uzunluğu: {len(content)} karakter")
             return content
-
         except Exception as e:
             logging.error(f"Sayfa içeriği alınamadı: {e}")
             return None
@@ -202,4 +195,3 @@ if __name__ == "__main__":
     flask_thread.start()
     time.sleep(3)
     start_bot()
-
