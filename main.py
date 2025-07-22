@@ -13,8 +13,6 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service
 
 # Configure logging
 logging.basicConfig(
@@ -68,7 +66,7 @@ class STWDOTelegramBot:
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
         self.website_url = "https://www.stwdo.de/en/living-houses-application/current-housing-offers"
         self.german_url = "https://www.stwdo.de/de/wohnen-bewerben/aktuelle-wohnungsangebote"
-        self.check_interval = 300  # Increased to 5 minutes to avoid rate limiting
+        self.check_interval = 300  # 5 minutes between checks
         self.last_hash = None
         self.last_rooms_status = None
         
@@ -76,24 +74,29 @@ class STWDOTelegramBot:
             logging.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables!")
             raise ValueError("Telegram configuration missing")
         
-        # Configure Selenium options
-        self.chrome_options = Options()
-        self.chrome_options.add_argument("--headless")
-        self.chrome_options.add_argument("--no-sandbox")
-        self.chrome_options.add_argument("--disable-dev-shm-usage")
-        self.chrome_options.add_argument("--window-size=1920,1080")
-        self.chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-        
         logging.info(f"Bot initialized - Chat ID: {self.chat_id}")
     
     def init_webdriver(self):
-        """Initialize and return a Chrome WebDriver"""
+        """Initialize remote WebDriver using free Selenium Grid"""
         try:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=self.chrome_options)
+            # Choose one of these free Selenium Grid providers:
+            selenium_url = "http://demo.zalenium.com/wd/hub"  # Free public Zalenium
+            # selenium_url = "https://USERNAME:ACCESS_KEY@hub.lambdatest.com/wd/hub"  # LambdaTest (sign up required)
+            
+            options = Options()
+            options.add_argument("--headless")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--window-size=1920,1080")
+            options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            
+            driver = webdriver.Remote(
+                command_executor=selenium_url,
+                options=options
+            )
             return driver
         except Exception as e:
-            logging.error(f"Failed to initialize WebDriver: {e}")
+            logging.error(f"Failed to initialize remote WebDriver: {e}")
             raise
     
     def send_telegram_message(self, message):
@@ -119,7 +122,7 @@ class STWDOTelegramBot:
         return False
     
     def fetch_page_content(self):
-        """Fetch the STWDO website content using Selenium"""
+        """Fetch the STWDO website content using remote Selenium"""
         driver = None
         try:
             driver = self.init_webdriver()
@@ -127,16 +130,15 @@ class STWDOTelegramBot:
             # Try English version first
             driver.get(self.website_url)
             
-            # Wait for either listings or no results message
+            # Wait longer for remote Selenium (30 seconds)
             try:
-                WebDriverWait(driver, 20).until(
+                WebDriverWait(driver, 30).until(
                     EC.presence_of_element_located(
                         (By.CSS_SELECTOR, ".housing-offer-item, .offer-item, .no-results, .noResults")
                     )
                 )
             except:
-                # Fallback - just get whatever content is there after timeout
-                pass
+                pass  # Fallback to raw page source
             
             content = driver.page_source
             
@@ -144,7 +146,7 @@ class STWDOTelegramBot:
             if "no results found" in content.lower():
                 driver.get(self.german_url)
                 try:
-                    WebDriverWait(driver, 20).until(
+                    WebDriverWait(driver, 30).until(
                         EC.presence_of_element_located(
                             (By.CSS_SELECTOR, ".housing-offer-item, .offer-item, .no-results, .keine-ergebnisse")
                         )
@@ -170,10 +172,10 @@ class STWDOTelegramBot:
         
         soup = BeautifulSoup(content, 'html.parser')
         
-        # Look for listings - update these selectors based on actual website structure
+        # Look for listings - update selectors if needed
         listings = soup.select('.housing-offer-item, .offer-item, .list-item, .result-item')
         
-        # Check for explicit "no results" messages
+        # Check for "no results" messages
         no_results = soup.find(string=re.compile(r'no results found|keine ergebnisse gefunden', re.I))
         
         analysis = {
@@ -189,14 +191,13 @@ class STWDOTelegramBot:
         if listings:
             # Extract basic info from listings
             rooms_info = []
-            for listing in listings[:5]:  # Just first 5 for analysis
+            for listing in listings[:5]:  # First 5 listings
                 title = listing.get_text(' ', strip=True)[:100]
                 rooms_info.append(title)
             
             analysis["sample_listings"] = rooms_info
             return True, f"Found {len(listings)} potential rooms", analysis
         
-        # If no clear signal, assume no rooms but with lower confidence
         return False, "No clear room listings detected", analysis
     
     def check_for_updates(self, content):
@@ -237,9 +238,9 @@ class STWDOTelegramBot:
 
 📍 <b>Monitoring:</b> <a href="{self.website_url}">STWDO Housing Offers</a>
 ⏰ <b>Check interval:</b> Every {self.check_interval//60} minutes
-🛠️ <b>Method:</b> Full browser rendering for accurate results
+🌐 <b>Method:</b> Remote browser (no local Chrome needed)
 
-<i>Bot is now running with improved detection capabilities!</i>
+<i>Bot is now running with reliable remote Selenium!</i>
 """
         self.send_telegram_message(startup_msg.strip())
         
