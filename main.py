@@ -8,15 +8,7 @@ from datetime import datetime
 import requests
 import re
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service as ChromeService
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
-# Logging ayarları
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
@@ -24,10 +16,6 @@ app = Flask(__name__)
 @app.route("/")
 def home():
     return "STWDO Bot is running!"
-
-@app.route("/status")
-def status():
-    return {"status": "active", "timestamp": datetime.now().isoformat()}
 
 class STWDOTelegramBot:
     def __init__(self):
@@ -39,49 +27,15 @@ class STWDOTelegramBot:
         self.last_hash = None
         self.last_rooms_status = None
 
-        if not self.bot_token or not self.chat_id:
-            raise ValueError("TELEGRAM_BOT_TOKEN ve TELEGRAM_CHAT_ID ortam değişkenleri eksik")
-
-    def init_webdriver(self):
-        try:
-            options = Options()
-            options.add_argument("--headless")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--window-size=1920,1080")
-            options.add_argument("user-agent=Mozilla/5.0")
-            driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
-            return driver
-        except Exception as e:
-            logging.error(f"Yerel WebDriver başlatılamadı: {e}")
-            raise
-
     def fetch_page_content(self):
-        driver = None
         try:
-            driver = self.init_webdriver()
-            driver.get(self.website_url)
-
-            WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".housing-offer-item, .offer-item"))
-            )
-            content = driver.page_source
-
-            if "no results found" in content.lower():
-                driver.get(self.german_url)
-                WebDriverWait(driver, 30).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".housing-offer-item, .offer-item"))
-                )
-                content = driver.page_source
-
-            logging.info(f"Sayfa içerik uzunluğu: {len(content)} karakter")
-            return content
+            response = requests.get(self.website_url, timeout=15)
+            if "no results found" in response.text.lower():
+                response = requests.get(self.german_url, timeout=15)
+            return response.text
         except Exception as e:
-            logging.error(f"Sayfa içeriği alınamadı: {e}")
+            logging.error(f"Sayfa alınamadı: {e}")
             return None
-        finally:
-            if driver:
-                driver.quit()
 
     def analyze_page_content(self, content):
         soup = BeautifulSoup(content, 'html.parser')
@@ -112,7 +66,7 @@ class STWDOTelegramBot:
                 'text': message,
                 'parse_mode': 'HTML'
             }
-            requests.post(url, data=data, timeout=15)
+            requests.post(url, data=data)
             logging.info("Telegram mesajı gönderildi.")
         except Exception as e:
             logging.error(f"Telegram mesajı gönderilemedi: {e}")
@@ -139,31 +93,11 @@ class STWDOTelegramBot:
         return False, f"Değişiklik yok: {status_msg}", analysis
 
     def run_monitoring(self):
-        logging.info("STWDO yurt botu başlatıldı!")
-        content = self.fetch_page_content()
-
-        if content:
-            should_notify, message, analysis = self.check_for_updates(content)
-            if should_notify:
-                alert_msg = f"""
-🏠 <b>YURT ODASI BULUNDU!</b>
-
-{message}
-
-🔗 <a href="{self.website_url}">Hemen kontrol et ve başvur!</a>
-
-📊 <b>Detaylar:</b>
-• İlan sayısı: {analysis.get('listings_count', 0)}
-• Uzunluk: {analysis.get('content_length', 0)} karakter
-• Zaman: {analysis.get('timestamp')}
-"""
-                self.send_telegram_message(alert_msg.strip())
-
+        logging.info("STWDO yurt botu çalışıyor...")
         while True:
             try:
                 logging.info("Yeni kontrol başlatılıyor...")
                 content = self.fetch_page_content()
-
                 if content:
                     should_notify, message, analysis = self.check_for_updates(content)
                     if should_notify:
@@ -175,7 +109,7 @@ class STWDOTelegramBot:
 🔗 <a href="{self.website_url}">Hemen kontrol et</a>
 """)
             except Exception as e:
-                logging.error(f"Döngü hatası: {e}")
+                logging.error(f"Hata: {e}")
             time.sleep(self.check_interval)
 
 def start_bot():
