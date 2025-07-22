@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 import requests
 import re
-# Selenium imports removed for lighter deployment
+from bs4 import BeautifulSoup
 
 # Configure logging
 logging.basicConfig(
@@ -25,355 +25,487 @@ def home():
 def status():
     return {"status": "active", "timestamp": datetime.now().isoformat()}
 
+@app.route("/test")
+def test():
+    """Test endpoint to manually trigger a check"""
+    try:
+        bot = STWDOTelegramBot()
+        content = bot.fetch_page_content()
+        if content:
+            rooms_available, message, analysis = bot.analyze_page_content(content)
+            
+            # Extract some sample text to help debug
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(content, 'html.parser')
+            page_text = soup.get_text()
+            
+            # Look for specific terms in the content
+            sample_lines = []
+            for line in page_text.split('\n')[:50]:  # First 50 lines
+                line = line.strip()
+                if line and len(line) > 10:
+                    sample_lines.append(line)
+            
+            return {
+                "rooms_available": rooms_available,
+                "message": message,
+                "analysis": analysis,
+                "content_length": len(content),
+                "page_text_length": len(page_text),
+                "sample_content": sample_lines[:20],  # First 20 meaningful lines
+                "contains_zimmer": "zimmer" in content.lower(),
+                "contains_dortmund": "dortmund" in content.lower(),
+                "contains_wg": "wg" in content.lower(),
+                "contains_no_results": "No results found" in content
+            }
+        return {"error": "Could not fetch content"}
+    except Exception as e:
+        return {"error": str(e)}
+
 class STWDOTelegramBot:
     def __init__(self):
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
         self.website_url = "https://www.stwdo.de/en/living-houses-application/current-housing-offers"
-        self.check_interval = 45  # Check every 45 seconds
+        self.check_interval = 90  # Check every 90 seconds
         self.last_hash = None
-        self.last_content_length = 0
-        self.no_results_text = "No results found for the given search criteria"
-        self.is_first_run = True
-        # Removed Selenium driver initialization
+        self.last_rooms_status = None  # Track if rooms were available in last check
+        
+        # Known messages when no rooms are available
+        self.no_rooms_indicators = [
+            "No results found for the given search criteria",
+            "no results found",
+            "keine ergebnisse gefunden",
+            "keine ergebnisse",
+            "currently no offers available"
+        ]
+        
+        # Positive indicators that rooms are available
+        self.positive_room_indicators = [
+            # German terms (likely what appears when rooms are available)
+            "zimmer", "wohnung", "wg", "frauen-wg", "männer-wg", 
+            "dortmund", "hagen", "iserlohn", "soest", "bochum",
+            "bewerbung", "bewerben", "verfügbar",
+            # English terms
+            "room", "flat", "apartment", "women", "men", "shared flat",
+            "available", "apply", "application"
+        ]
         
         if not self.bot_token or not self.chat_id:
             logging.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables!")
             raise ValueError("Telegram configuration missing")
-    
-    def setup_driver(self):
-        """Setup headless Chrome driver for JavaScript-heavy sites"""
-        try:
-            chrome_options = Options()
-            chrome_options.add_argument('--headless')
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--window-size=1920,1080')
-            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-            
-            # Try to create driver
-            self.driver = webdriver.Chrome(options=chrome_options)
-            logging.info("✅ Selenium WebDriver initialized successfully")
-            return True
-        except Exception as e:
-            logging.warning(f"⚠️ Could not initialize Selenium: {e}. Falling back to requests.")
-            self.driver = None
-            return False
+        
+        logging.info(f"Bot initialized - Chat ID: {self.chat_id}")
     
     def send_telegram_message(self, message):
-        try:
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            data = {
-                'chat_id': self.chat_id,
-                'text': message,
-                'parse_mode': 'HTML',
-                'disable_web_page_preview': False
-            }
-            response = requests.post(url, data=data, timeout=10)
-            response.raise_for_status()
-            logging.info("Telegram message sent successfully")
-            return True
-        except Exception as e:
-            logging.error(f"Failed to send Telegram message: {e}")
-            return False
+        """Send message to Telegram with retry logic"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+                data = {
+                    'chat_id': self.chat_id,
+                    'text': message,
+                    'parse_mode': 'HTML',
+                    'disable_web_page_preview': False
+                }
+                response = requests.post(url, data=data, timeout=15)
+                response.raise_for_status()
+                logging.info(f"✅ Telegram message sent successfully (attempt {attempt + 1})")
+                return True
+            except Exception as e:
+                logging.error(f"❌ Failed to send Telegram message (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)  # Wait before retry
+        return False
     
-    def fetch_page_content_selenium(self):
-        """Fetch content using Selenium to handle JavaScript"""
-        try:
-            if not self.driver:
-                return None
-                
-            self.driver.get(self.website_url)
-            
-            # Wait for page to load
-            WebDriverWait(self.driver, 20).until(
-                lambda driver: driver.execute_script("return document.readyState") == "complete"
-            )
-            
-            # Wait a bit more for any dynamic content
-            time.sleep(5)
-            
-            # Get page source after JavaScript execution
-            content = self.driver.page_source
-            logging.info(f"Selenium: Fetched {len(content)} characters")
-            return content
-            
-        except Exception as e:
-            logging.error(f"Selenium fetch error: {e}")
-            return None
-    
-    def fetch_page_content_requests(self):
-        """Fallback method using requests"""
+    def fetch_page_content(self):
+        """Fetch the STWDO website content with multiple strategies"""
         try:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9,de;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',  # German first for better content
                 'Accept-Encoding': 'gzip, deflate, br',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
+                'Cache-Control': 'no-cache, no-store, must-revalidate',  # Force fresh content
+                'Pragma': 'no-cache',
+                'Expires': '0',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1'
             }
             
-            session = requests.Session()
-            response = session.get(self.website_url, headers=headers, timeout=30)
-            response.raise_for_status()
-            
-            logging.info(f"Requests: Fetched {len(response.text)} characters")
-            return response.text
-            
+            # Use session with cookies for better compatibility
+            with requests.Session() as session:
+                # First, try the English version
+                response = session.get(self.website_url, headers=headers, timeout=30)
+                response.raise_for_status()
+                
+                content = response.text
+                logging.info(f"📄 Fetched {len(content)} characters from English page")
+                
+                # If English page shows no results, try German version
+                if "No results found for the given search criteria" in content:
+                    german_url = "https://www.stwdo.de/de/wohnen-bewerben/aktuelle-wohnungsangebote"
+                    logging.info("🇩🇪 English page shows no results, trying German page...")
+                    
+                    german_response = session.get(german_url, headers=headers, timeout=30)
+                    german_response.raise_for_status()
+                    
+                    german_content = german_response.text
+                    logging.info(f"📄 Fetched {len(german_content)} characters from German page")
+                    
+                    # Use German content if it has more content or different results
+                    if (len(german_content) > len(content) + 500 or 
+                        "Keine Ergebnisse" not in german_content):
+                        logging.info("🔄 Using German page content (more comprehensive)")
+                        content = german_content
+                
+                return content
+                
+        except requests.exceptions.RequestException as e:
+            logging.error(f"🚫 Network error fetching website: {e}")
+            return None
         except Exception as e:
-            logging.error(f"Requests fetch error: {e}")
+            logging.error(f"🚫 Unexpected error fetching website: {e}")
             return None
     
-    def fetch_page_content(self):
-        """Try Selenium first, fallback to requests"""
-        # Try Selenium first (better for JavaScript sites)
-        content = self.fetch_page_content_selenium()
-        if content:
-            return content
-            
-        # Fallback to requests
-        return self.fetch_page_content_requests()
-    
-    def advanced_room_detection(self, content):
-        """Enhanced room detection with multiple strategies"""
+    def analyze_page_content(self, content):
+        """Analyze the STWDO page for available rooms"""
         if not content:
             return False, "No content to analyze", {}
         
-        content_lower = content.lower()
+        # Parse HTML
+        soup = BeautifulSoup(content, 'html.parser')
+        page_text = soup.get_text().strip()
+        page_text_lower = page_text.lower()
         
-        # Strategy 1: Check for explicit "no results" message
-        has_no_results = self.no_results_text.lower() in content_lower
-        
-        # Strategy 2: Look for room/housing related keywords
-        room_keywords = [
-            'apply now', 'application', 'room', 'apartment', 'flat', 'housing',
-            'available', 'vacancy', 'zimmer', 'wohnung', 'verfügbar', 'bewerbung',
-            'residential complex', 'dormitory', 'student housing'
-        ]
-        keyword_matches = sum(1 for keyword in room_keywords if keyword in content_lower)
-        
-        # Strategy 3: Look for price indicators
-        price_patterns = [
-            r'\d+[.,]\d+\s*€',  # 123.45 €
-            r'\d+\s*€',         # 123 €
-            r'€\s*\d+',         # € 123
-            r'\d+[.,]\d+\s*eur', # 123.45 EUR
-            r'rent',
-            r'miete'
-        ]
-        price_matches = sum(1 for pattern in price_patterns if re.search(pattern, content_lower))
-        
-        # Strategy 4: Look for application forms/buttons
-        form_indicators = [
-            'form', 'submit', 'apply', 'bewerbung', 'anmelden', 'button',
-            'input', 'select', 'bewerben'
-        ]
-        form_matches = sum(1 for indicator in form_indicators if indicator in content_lower)
-        
-        # Strategy 5: Content structure analysis
-        content_length = len(content.strip())
-        
-        # Strategy 6: Look for specific STWDO housing indicators
-        stwdo_indicators = [
-            'residential complex', 'wohnanlage', 'studentenwohnen',
-            'dortmund', 'hagen', 'iserlohn', 'soest'
-        ]
-        stwdo_matches = sum(1 for indicator in stwdo_indicators if indicator in content_lower)
-        
-        # Strategy 7: Detect significant content changes (could indicate new listings)
-        content_change_significant = abs(content_length - self.last_content_length) > 1000
-        self.last_content_length = content_length
-        
+        # Initialize analysis
         analysis = {
-            "has_no_results": has_no_results,
-            "keyword_matches": keyword_matches,
-            "price_matches": price_matches,
-            "form_matches": form_matches,
-            "content_length": content_length,
-            "stwdo_matches": stwdo_matches,
-            "content_change_significant": content_change_significant,
-            "timestamp": datetime.now().strftime('%H:%M:%S')
+            "content_length": len(content),
+            "page_text_length": len(page_text),
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
         
-        # Scoring system (more lenient than before)
-        score = 0
+        # Check for explicit "no rooms" messages
+        has_no_rooms_message = any(
+            indicator.lower() in page_text_lower 
+            for indicator in self.no_rooms_indicators
+        )
+        analysis["has_no_rooms_message"] = has_no_rooms_message
         
-        # Strong positive indicators
-        if not has_no_results:
-            score += 3
-        if price_matches > 0:
-            score += 2
-        if form_matches > 2:
-            score += 2
-        if keyword_matches > 5:
-            score += 2
+        # Look for specific room offerings (like "Zimmer in 3er-Frauen-WG")
+        room_offering_patterns = [
+            r'zimmer\s+in\s+\d+er.*wg',  # "Zimmer in 3er-Frauen-WG"
+            r'wohnung.*dortmund',
+            r'dortmund.*zimmer',
+            r'frauen-wg',
+            r'männer-wg',
+            r'\d+\s*zimmer.*wg',
+            r'wg.*zimmer'
+        ]
+        
+        room_pattern_matches = sum(
+            1 for pattern in room_offering_patterns 
+            if re.search(pattern, page_text_lower, re.IGNORECASE)
+        )
+        analysis["room_pattern_matches"] = room_pattern_matches
+        
+        # Count positive indicators
+        positive_count = sum(
+            1 for term in self.positive_room_indicators 
+            if term in page_text_lower
+        )
+        analysis["positive_indicators"] = positive_count
+        
+        # Look for specific STWDO structure elements
+        # When rooms are available, there should be clickable adverts/links
+        links = soup.find_all('a', href=True)
+        room_related_links = []
+        for link in links:
+            href = link.get('href', '').lower()
+            text = link.get_text().lower()
+            if any(term in href + ' ' + text for term in ['room', 'flat', 'apartment', 'apply', 'zimmer', 'wohnung']):
+                room_related_links.append(link.get('href'))
+        
+        analysis["room_related_links"] = len(room_related_links)
+        
+        # Look for forms (application forms)
+        forms = soup.find_all('form')
+        inputs = soup.find_all(['input', 'button', 'select', 'textarea'])
+        analysis["forms_count"] = len(forms)
+        analysis["input_elements"] = len(inputs)
+        
+        # Look for price information
+        price_patterns = [
+            r'\d+[.,]\d+\s*€',
+            r'\d+\s*€', 
+            r'€\s*\d+',
+            r'\d+[.,]\d+\s*EUR',
+            r'\b\d+\s*euro\b'
+        ]
+        price_matches = sum(1 for pattern in price_patterns if re.search(pattern, page_text, re.IGNORECASE))
+        analysis["price_matches"] = price_matches
+        
+        # Decision logic for room availability
+        # Rooms are available if:
+        # 1. NO explicit "no rooms" message AND
+        # 2. We have room-specific patterns OR substantial positive indicators
+        
+        rooms_available = False
+        confidence_score = 0
+        
+        if not has_no_rooms_message:
+            confidence_score += 3  # Base score if no "no rooms" message
             
-        # Moderate indicators
-        if stwdo_matches > 0:
-            score += 1
-        if content_length > 8000:  # Substantial content
-            score += 1
-        if content_change_significant:
-            score += 1
+        if room_pattern_matches > 0:  # Specific room patterns found (like "Zimmer in 3er-Frauen-WG")
+            confidence_score += 4  # High confidence for specific patterns
+            
+        if positive_count >= 10:  # Many housing-related terms
+            confidence_score += 3
+        elif positive_count >= 5:
+            confidence_score += 2
+        elif positive_count >= 3:
+            confidence_score += 1
+            
+        if room_related_links > 0:  # Actual application links
+            confidence_score += 2
+            
+        if price_matches > 0:  # Price information suggests actual listings
+            confidence_score += 2
+            
+        if len(forms) > 0 or len(inputs) > 5:  # Application forms present
+            confidence_score += 1
         
-        # Decision threshold (lowered from 4 to 3)
-        rooms_available = score >= 3
+        # Consider content length - available rooms page should be longer
+        if len(page_text) > 1200:  # More content than just "no results"
+            confidence_score += 1
+        elif len(page_text) > 800:
+            confidence_score += 0.5
+            
+        analysis["confidence_score"] = confidence_score
         
-        status_msg = f"Score: {score}, no_results={has_no_results}, keywords={keyword_matches}, prices={price_matches}, forms={form_matches}"
+        # Lower threshold for room availability detection
+        rooms_available = confidence_score >= 3
         
-        logging.info(f"Room detection: {status_msg}")
+        # Generate detailed status message
+        status_elements = [
+            f"No-rooms-msg: {has_no_rooms_message}",
+            f"Room-patterns: {room_pattern_matches}",
+            f"Positive: {positive_count}",
+            f"Links: {len(room_related_links)}",
+            f"Prices: {price_matches}",
+            f"Forms: {len(forms)}",
+            f"Score: {confidence_score:.1f}"
+        ]
+        status_msg = " | ".join(status_elements)
+        
+        logging.info(f"🔍 Analysis: {status_msg} → Rooms Available: {rooms_available}")
         
         return rooms_available, status_msg, analysis
     
-    def check_for_rooms(self, content):
-        """Main room detection logic with improved change detection"""
-        rooms_available, status_msg, analysis = self.advanced_room_detection(content)
+    def check_for_updates(self, content):
+        """Check for content changes and room availability"""
+        if not content:
+            return False, "No content retrieved", None
+        
+        # Analyze current content
+        rooms_available, status_msg, analysis = self.analyze_page_content(content)
         
         # Create hash for change detection
-        if content:
-            # Use a more sensitive hash that includes key indicators
-            hash_content = f"{content[:5000]}-{analysis['keyword_matches']}-{analysis['price_matches']}-{analysis['form_matches']}"
-            current_hash = hashlib.md5(hash_content.encode('utf-8')).hexdigest()
-        else:
-            current_hash = "empty"
+        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
         
-        # First run logic
+        # Check if this is first run
         if self.last_hash is None:
-            self.last_hash = current_hash
-            if rooms_available and not self.is_first_run:
-                return True, f"Rooms detected on startup! {status_msg}"
-            return False, f"Initial check: {status_msg}"
+            self.last_hash = content_hash
+            self.last_rooms_status = rooms_available
+            
+            if rooms_available:
+                return True, f"🏠 ROOMS FOUND ON STARTUP! {status_msg}", analysis
+            else:
+                return False, f"Initial scan complete - no rooms currently. {status_msg}", analysis
         
         # Check for changes
-        content_changed = current_hash != self.last_hash
-        self.last_hash = current_hash
+        content_changed = content_hash != self.last_hash
+        rooms_status_changed = rooms_available != self.last_rooms_status
         
-        if content_changed:
-            logging.info(f"Content changed detected! {status_msg}")
-            if rooms_available:
-                return True, f"🏠 NEW ROOMS AVAILABLE! {status_msg}"
+        # Update tracking
+        self.last_hash = content_hash
+        notification_needed = False
+        notification_msg = ""
+        
+        if rooms_available and (content_changed or rooms_status_changed):
+            # Rooms are available and something changed
+            notification_needed = True
+            if rooms_status_changed:
+                notification_msg = f"🚨 NEW ROOMS AVAILABLE! (Status changed) {status_msg}"
             else:
-                # Even if no rooms detected, significant changes might indicate rooms
-                if analysis['content_change_significant']:
-                    return True, f"⚠️ SIGNIFICANT CHANGE detected (possible rooms): {status_msg}"
-                return False, f"Content changed but no rooms: {status_msg}"
+                notification_msg = f"🚨 ROOMS AVAILABLE! (Content updated) {status_msg}"
+                
+        elif content_changed and not analysis.get("has_no_rooms_message", True):
+            # Content changed and no explicit "no rooms" message
+            notification_needed = True
+            notification_msg = f"⚠️ WEBSITE UPDATED - Possible new rooms! {status_msg}"
+            
+        elif rooms_status_changed and not rooms_available:
+            # Rooms became unavailable
+            logging.info(f"📝 Rooms no longer available: {status_msg}")
         
-        # Check if we have rooms but missed them on first run
-        if self.is_first_run and rooms_available:
-            return True, f"Rooms found on initial scan: {status_msg}"
+        # Update room status tracking
+        self.last_rooms_status = rooms_available
         
-        return False, f"No changes: {status_msg}"
+        if notification_needed:
+            return True, notification_msg, analysis
+        else:
+            return False, f"No changes detected. {status_msg}", analysis
     
     def run_monitoring(self):
-        logging.info("🤖 STWDO Telegram Bot started!")
+        """Main monitoring loop"""
+        logging.info("🚀 STWDO Telegram Bot started!")
         
-        # Try to setup Selenium
-        selenium_available = self.setup_driver()
-        
-        # Send startup message
-        method_info = "with Selenium WebDriver" if selenium_available else "with requests only"
+        # Send startup notification
         startup_msg = f"""
-🤖 <b>STWDO Dorm Monitor Started!</b> {method_info}
+🤖 <b>STWDO Dorm Monitor Online!</b>
 
-📍 Monitoring: <a href="{self.website_url}">STWDO Housing Offers</a>
-⏰ Checking every {self.check_interval} seconds
-🏠 Enhanced detection with lower thresholds!
+📍 <b>Monitoring:</b> <a href="{self.website_url}">STWDO Housing Offers</a>
+⏰ <b>Check interval:</b> Every {self.check_interval} seconds
+🎯 <b>Optimized for:</b> STWDO website structure
 
-<i>Bot is now running 24/7...</i>
+<b>🔔 You'll be notified when:</b>
+• New dorm rooms become available
+• Website content changes significantly
+• "No results" message disappears
 
-🔧 <b>Improvements:</b>
-• JavaScript content loading support
-• More sensitive change detection
-• Lower detection thresholds
-• Multiple detection strategies
+<i>Bot is running 24/7 and ready to catch opportunities!</i>
+
+💡 <b>Tip:</b> When you get a notification, act quickly as rooms fill up fast!
         """
+        
         self.send_telegram_message(startup_msg.strip())
         
         consecutive_errors = 0
-        max_errors = 3
+        max_consecutive_errors = 10
+        total_checks = 0
         
         try:
             while True:
                 try:
-                    logging.info("🔍 Checking for room updates...")
+                    total_checks += 1
+                    logging.info(f"🔍 Check #{total_checks}: Monitoring STWDO website...")
+                    
+                    # Fetch and analyze content
                     content = self.fetch_page_content()
                     
                     if content:
-                        rooms_available, status_msg = self.check_for_rooms(content)
+                        should_notify, message, analysis = self.check_for_updates(content)
                         
-                        # Mark first run as complete
-                        if self.is_first_run:
-                            self.is_first_run = False
-                        
-                        if rooms_available:
-                            # ROOMS FOUND - Send alert!
+                        if should_notify:
+                            # Send notification
                             alert_msg = f"""
-🚨 <b>URGENT: DORM ROOMS AVAILABLE!</b> 🚨
+{message}
 
-🏠 Rooms detected on STWDO website!
-⚡ Act fast - limited spots available!
+🔗 <b><a href="{self.website_url}">🏠 CHECK WEBSITE NOW ➤</a></b>
 
-🔗 <b><a href="{self.website_url}">CHECK NOW ➤ CLICK HERE</a></b>
+📊 <b>Detection Details:</b>
+• Confidence Score: {analysis.get('confidence_score', 0)}/7
+• Page Length: {analysis.get('page_text_length', 0)} chars
+• Room Links Found: {analysis.get('room_related_links', 0)}
 
-📅 Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-🔍 Detection: {status_msg}
+📅 <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-⚠️ Apply immediately if you see available rooms!
+⚡ <b>Next Steps:</b>
+1. Click the link above immediately
+2. Look for available rooms/flats
+3. Apply quickly if you find suitable options!
+
+<i>Remember: Popular rooms get taken within minutes!</i>
                             """
                             
-                            # Send notification
                             success = self.send_telegram_message(alert_msg.strip())
                             if success:
-                                logging.warning("🚨 ROOM ALERT SENT! 🚨")
-                            
+                                logging.warning(f"🚨 ALERT SENT: {message}")
+                            else:
+                                logging.error("Failed to send alert message")
                         else:
-                            logging.info(f"Status: {status_msg}")
+                            logging.info(f"✅ Check complete: {message}")
+                        
+                        consecutive_errors = 0  # Reset error counter
+                        
                     else:
-                        logging.warning("Failed to fetch content")
+                        consecutive_errors += 1
+                        logging.error(f"❌ Failed to fetch content (error #{consecutive_errors})")
+                        
+                        if consecutive_errors == 5:
+                            # Send warning after 5 consecutive errors
+                            warning_msg = "⚠️ Bot having trouble accessing STWDO website. Will keep trying..."
+                            self.send_telegram_message(warning_msg)
                     
-                    consecutive_errors = 0
+                except KeyboardInterrupt:
+                    logging.info("🛑 Bot stopped by user")
+                    break
                     
                 except Exception as e:
                     consecutive_errors += 1
-                    logging.error(f"Error in monitoring loop: {e}")
+                    logging.error(f"💥 Unexpected error in monitoring loop: {e}")
                     
-                    if consecutive_errors >= max_errors:
-                        error_msg = f"⚠️ Bot encountered {max_errors} consecutive errors. Still monitoring..."
-                        self.send_telegram_message(error_msg)
-                        consecutive_errors = 0
+                    if consecutive_errors >= max_consecutive_errors:
+                        error_msg = f"""
+🚨 <b>Bot Error Alert</b>
+
+The bot has encountered {max_consecutive_errors} consecutive errors but is still running.
+
+<b>Last error:</b> {str(e)[:200]}
+
+<i>Monitoring will continue. If issues persist, check the logs.</i>
+                        """
+                        self.send_telegram_message(error_msg.strip())
+                        consecutive_errors = 0  # Reset to prevent spam
                 
                 # Wait before next check
+                logging.info(f"💤 Waiting {self.check_interval} seconds until next check...")
                 time.sleep(self.check_interval)
                 
-        finally:
-            # Clean up Selenium driver
-            if self.driver:
-                try:
-                    self.driver.quit()
-                    logging.info("Selenium driver closed")
-                except:
-                    pass
+        except Exception as critical_error:
+            critical_msg = f"""
+🆘 <b>Critical Bot Error</b>
+
+The monitoring bot has encountered a critical error and may have stopped.
+
+<b>Error:</b> {str(critical_error)[:300]}
+
+<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Please check the application logs and restart if necessary.
+            """
+            self.send_telegram_message(critical_msg.strip())
+            logging.critical(f"Critical error: {critical_error}")
+            raise
 
 def start_bot():
+    """Start the bot with error handling"""
     try:
         bot = STWDOTelegramBot()
         bot.run_monitoring()
     except Exception as e:
         logging.error(f"Failed to start bot: {e}")
+        raise
 
 if __name__ == "__main__":
-    # Start Flask app in a separate thread for cloud hosting
-    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))))
+    # Start Flask app in background for Render.com
+    flask_thread = Thread(target=lambda: app.run(
+        host="0.0.0.0", 
+        port=int(os.environ.get("PORT", 10000)),
+        debug=False
+    ))
     flask_thread.daemon = True
     flask_thread.start()
     
     # Give Flask time to start
-    time.sleep(2)
-    logging.info("Flask server started")
+    time.sleep(3)
+    logging.info("🌐 Flask server started")
     
-    # Start the bot monitoring
+    # Start the monitoring bot
     start_bot()
