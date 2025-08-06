@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dorm Room Monitor</title>
+    <link href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='style.css') }}" rel="stylesheet">
+</head>
+<body>
+    <div class="container mt-4">
+        <!-- Header -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <h1 class="display-4 text-center mb-3">
+                    <i class="fas fa-home me-3"></i>Dorm Room Monitor
+                </h1>
+                <p class="lead text-center text-muted">
+                    Monitor dorm room availability and get instant Telegram notifications
+                </p>
+            </div>
+        </div>
+
+        <!-- Flash Messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="row mb-4">
+                    <div class="col-12">
+                        {% for category, message in messages %}
+                            <div class="alert {% if category == 'error' %}alert-danger{% elif category == 'success' %}alert-success{% elif category == 'warning' %}alert-warning{% else %}alert-info{% endif %} alert-dismissible fade show" role="alert">
+                                <i class="fas {% if category == 'error' %}fa-exclamation-triangle{% elif category == 'success' %}fa-check-circle{% elif category == 'warning' %}fa-exclamation-circle{% else %}fa-info-circle{% endif %} me-2"></i>
+                                {{ message }}
+                                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                            </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <!-- Status Card -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">
+                            <i class="fas fa-chart-line me-2"></i>Monitoring Status
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-3 mb-3">
+                                <div class="d-flex align-items-center">
+                                    {% if status.is_running %}
+                                        <span class="badge bg-success me-2">
+                                            <i class="fas fa-play"></i> Running
+                                        </span>
+                                    {% else %}
+                                        <span class="badge bg-secondary me-2">
+                                            <i class="fas fa-stop"></i> Stopped
+                                        </span>
+                                    {% endif %}
+                                    <small class="text-muted">Status</small>
+                                </div>
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <div class="d-flex align-items-center">
+                                    {% if status.configured %}
+                                        <span class="badge bg-success me-2">
+                                            <i class="fas fa-check"></i> Ready
+                                        </span>
+                                    {% else %}
+                                        <span class="badge bg-warning me-2">
+                                            <i class="fas fa-cog"></i> Configure
+                                        </span>
+                                    {% endif %}
+                                    <small class="text-muted">Configuration</small>
+                                </div>
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <strong>{{ status.last_check_time or 'Never' }}</strong>
+                                <br><small class="text-muted">Last Check</small>
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <strong>{{ status.last_check_status }}</strong>
+                                <br><small class="text-muted">Result</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Control Buttons -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">
+                            <i class="fas fa-gamepad me-2"></i>Controls
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap gap-2">
+                            {% if status.is_running %}
+                                <form method="post" action="{{ url_for('stop_monitoring') }}" class="d-inline">
+                                    <button type="submit" class="btn btn-outline-danger">
+                                        <i class="fas fa-stop me-1"></i>Stop Monitoring
+                                    </button>
+                                </form>
+                            {% else %}
+                                <form method="post" action="{{ url_for('start_monitoring') }}" class="d-inline">
+                                    <button type="submit" class="btn btn-success" {% if not status.configured %}disabled{% endif %}>
+                                        <i class="fas fa-play me-1"></i>Start Monitoring
+                                    </button>
+                                </form>
+                            {% endif %}
+                            
+                            <form method="post" action="{{ url_for('manual_check') }}" class="d-inline">
+                                <button type="submit" class="btn btn-outline-primary" {% if not status.configured %}disabled{% endif %}>
+                                    <i class="fas fa-search me-1"></i>Manual Check
+                                </button>
+                            </form>
+                            
+                            <form method="post" action="{{ url_for('clear_logs') }}" class="d-inline">
+                                <button type="submit" class="btn btn-outline-secondary">
+                                    <i class="fas fa-trash me-1"></i>Clear Logs
+                                </button>
+                            </form>
+                            
+                            <form method="post" action="{{ url_for('test_telegram') }}" class="d-inline">
+                                <button type="submit" class="btn btn-outline-info" {% if not status.configured %}disabled{% endif %}>
+                                    <i class="fab fa-telegram me-1"></i>Test Telegram
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Configuration Form -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">
+                            <i class="fas fa-cog me-2"></i>Configuration
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <form method="post" action="{{ url_for('configure') }}">
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label for="url" class="form-label">
+                                        <i class="fas fa-link me-1"></i>Website URL to Monitor
+                                    </label>
+                                    <input type="url" class="form-control" id="url" name="url" 
+                                           value="{{ config.url }}" 
+                                           placeholder="https://example.com/dorm-rooms" required>
+                                    <div class="form-text">Enter the URL of the dorm room listings page</div>
+                                </div>
+                                
+                                <div class="col-md-6 mb-3">
+                                    <label for="check_interval" class="form-label">
+                                        <i class="fas fa-clock me-1"></i>Check Interval (seconds)
+                                    </label>
+                                    <input type="number" class="form-control" id="check_interval" name="check_interval" 
+                                           value="{{ config.check_interval }}" min="10" required>
+                                    <div class="form-text">How often to check for changes (minimum 10 seconds)</div>
+                                </div>
+                            </div>
+                            
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label for="bot_token" class="form-label">
+                                        <i class="fab fa-telegram me-1"></i>Telegram Bot Token
+                                    </label>
+                                    <input type="text" class="form-control" id="bot_token" name="bot_token" 
+                                           value="{{ config.bot_token }}" 
+                                           placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz" required>
+                                    <div class="form-text">Get this from @BotFather on Telegram</div>
+                                </div>
+                                
+                                <div class="col-md-6 mb-3">
+                                    <label for="chat_id" class="form-label">
+                                        <i class="fas fa-comments me-1"></i>Telegram Chat ID
+                                    </label>
+                                    <input type="text" class="form-control" id="chat_id" name="chat_id" 
+                                           value="{{ config.chat_id }}" 
+                                           placeholder="-1001234567890 or 123456789" required>
+                                    <div class="form-text">Your chat ID or group chat ID (use @userinfobot to find yours)</div>
+                                </div>
+                            </div>
+                            
+                            <div class="d-grid">
+                                <button type="submit" class="btn btn-primary">
+                                    <i class="fas fa-save me-1"></i>Save Configuration
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logs -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">
+                            <i class="fas fa-list-alt me-2"></i>Activity Logs
+                        </h5>
+                        <small class="text-muted">Last {{ logs|length }} entries</small>
+                    </div>
+                    <div class="card-body">
+                        {% if logs %}
+                            <div class="log-container" style="max-height: 400px; overflow-y: auto;">
+                                {% for log in logs|reverse %}
+                                    <div class="log-entry mb-2 p-2 border-start border-3 
+                                         {% if log.level == 'error' %}border-danger bg-danger bg-opacity-10
+                                         {% elif log.level == 'success' %}border-success bg-success bg-opacity-10
+                                         {% elif log.level == 'warning' %}border-warning bg-warning bg-opacity-10
+                                         {% else %}border-info bg-info bg-opacity-10{% endif %}">
+                                        <div class="d-flex justify-content-between align-items-start">
+                                            <div>
+                                                <i class="fas 
+                                                   {% if log.level == 'error' %}fa-exclamation-triangle text-danger
+                                                   {% elif log.level == 'success' %}fa-check-circle text-success
+                                                   {% elif log.level == 'warning' %}fa-exclamation-circle text-warning
+                                                   {% else %}fa-info-circle text-info{% endif %} me-2"></i>
+                                                <span>{{ log.message }}</span>
+                                            </div>
+                                            <small class="text-muted">{{ log.timestamp }}</small>
+                                        </div>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        {% else %}
+                            <div class="text-center text-muted py-4">
+                                <i class="fas fa-inbox fa-3x mb-3"></i>
+                                <p>No logs yet. Configure and start monitoring to see activity here.</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="row mt-5">
+            <div class="col-12">
+                <div class="text-center text-muted">
+                    <p>
+                        <i class="fas fa-home me-1"></i>
+                        Dorm Room Monitor - Stay updated with the latest availability
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JavaScript -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Auto-refresh script -->
+    <script>
+        // Auto-refresh the page every 30 seconds if monitoring is running
+        {% if status.is_running %}
+        setTimeout(function() {
+            window.location.reload();
+        }, 30000);
+        {% endif %}
+    </script>
+</body>
+</html>

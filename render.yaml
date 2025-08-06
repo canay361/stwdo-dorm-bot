@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: dorm-monitor
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT main:app
+    envVars:
+      - key: BOT_TOKEN
+        value: 8121909981:AAFfxdiRFLQvz6VUn_m4ZZFbCefDGL5qj_I
+      - key: CHAT_ID
+        value: 7455628027
+      - key: SESSION_SECRET
+        value: your-secret-key-here
